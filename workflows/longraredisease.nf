@@ -786,9 +786,17 @@ workflow LONGRAREDISEASE {
 */
 
     if (params.unify_vcf && params.sv && params.cnv && params.str) {
+        // Adding this for debugging to see what channels are actually going into the UnifyVCF
+        ch_sv_vcf_final.view { it -> "SV:  $it" }
+        ch_cnv_vcf.view      { it -> "CNV: $it" }
+        ch_str_vcf.view      { it -> "STR: $it" }
+
         ch_combined = ch_sv_vcf_final
-            .join(ch_cnv_vcf, by: 0, remainder: true)
-            .join(ch_str_vcf, by: 0, remainder: true)
+            .map { meta, vcf -> [meta.id, meta, vcf] }
+            .join(ch_cnv_vcf.map { meta, vcf -> [meta.id, vcf] }, remainder: true)
+            .join(ch_str_vcf.map { meta, vcf -> [meta.id, vcf] }, remainder: true)
+            .filter { _id, meta, sv, _cnv, _str -> sv != null }
+            .map    { _id, meta, sv, cnv, str -> [meta, sv, cnv, str] }
 
         UNIFYVCF(
             ch_combined.map { meta, sv, _cnv, _str -> [meta, sv] },
