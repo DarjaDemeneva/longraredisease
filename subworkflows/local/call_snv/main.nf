@@ -3,6 +3,7 @@
 include { CLAIR3 } from '../../../modules/nf-core/clair3/main.nf'
 include { CLAIR3_FIX} from '../../../modules/local/fix_header_snv/main'
 include { DEEPVARIANT_RUNDEEPVARIANT } from '../../../modules/nf-core/deepvariant/rundeepvariant/main.nf'
+include { PARABRICKS_DEEPVARIANT     } from '../../../modules/local/parabricks_deepvariant/main.nf'
 include { DEEPVARIANT_VCFSTATSREPORT } from '../../../modules/nf-core/deepvariant/vcfstatsreport/main.nf'
 include { BCFTOOLS_VIEW as BCFTOOLS_FILTER_CLAIR3 } from '../../../modules/nf-core/bcftools/view/main.nf'
 include { BCFTOOLS_VIEW as BCFTOOLS_FILTER_DEEPVARIANT } from '../../../modules/nf-core/bcftools/view/main.nf'
@@ -92,17 +93,51 @@ workflow CALL_SNV {
     ch_versions = ch_versions.mix(CLAIR3.out.versions)
 
     if (run_deepvariant) {
-        DEEPVARIANT_RUNDEEPVARIANT(
-            ch_input_deepvariant,
-            fasta,
-            fai,
-            [[:], []],
-            [[:], []]
-        )
+
+        // GPU profile -> NVIDIA Parabricks; otherwise Google DeepVariant on CPU.
+        // Uses the same profile check as the process_gpu label in conf/base.config.
+        def use_gpu = workflow.profile.tokenize(',').contains('gpu')
+
+        if (use_gpu) {
+            log.info "[CALL_SNV] 'gpu' profile detected: running DeepVariant with NVIDIA Parabricks"
+
+            // Pass the regions BED through the intervals slot so Nextflow stages it
+            // into the container (a bare path in ext.args would not be mounted).
+            ch_input_parabricks = params.deepvariant_regions
+                ? ch_input_deepvariant.map { meta, bam, bai, intervals ->
+                    tuple(meta, bam, bai, intervals ?: file(params.deepvariant_regions, checkIfExists: true))
+                }
+                : ch_input_deepvariant
+
+            PARABRICKS_DEEPVARIANT(
+                ch_input_parabricks,
+                fasta,
+                fai,
+                [[:], []],
+                [[:], []]
+            )
+
+            ch_dv_vcf       = PARABRICKS_DEEPVARIANT.out.vcf
+            ch_dv_vcf_index = PARABRICKS_DEEPVARIANT.out.vcf_index
+            ch_versions     = ch_versions.mix(PARABRICKS_DEEPVARIANT.out.versions)
+
+        } else {
+            DEEPVARIANT_RUNDEEPVARIANT(
+                ch_input_deepvariant,
+                fasta,
+                fai,
+                [[:], []],
+                [[:], []]
+            )
+
+            ch_dv_vcf       = DEEPVARIANT_RUNDEEPVARIANT.out.vcf
+            ch_dv_vcf_index = DEEPVARIANT_RUNDEEPVARIANT.out.vcf_index
+            ch_versions     = ch_versions.mix(DEEPVARIANT_RUNDEEPVARIANT.out.versions)
+        }
 
         if (params.filter_pass_snv) {
-            ch_deepvariant_vcf = DEEPVARIANT_RUNDEEPVARIANT.out.vcf
-                .join(DEEPVARIANT_RUNDEEPVARIANT.out.vcf_index, by: 0)
+            ch_deepvariant_vcf = ch_dv_vcf
+                .join(ch_dv_vcf_index, by: 0)
 
             BCFTOOLS_FILTER_DEEPVARIANT(
                 ch_deepvariant_vcf,
@@ -116,14 +151,12 @@ workflow CALL_SNV {
             ch_versions = ch_versions.mix(BCFTOOLS_FILTER_DEEPVARIANT.out.versions)
 
         } else {
-            ch_vcf_deepvariant = DEEPVARIANT_RUNDEEPVARIANT.out.vcf
-            ch_tbi_deepvariant = DEEPVARIANT_RUNDEEPVARIANT.out.vcf_index
+            ch_vcf_deepvariant = ch_dv_vcf
+            ch_tbi_deepvariant = ch_dv_vcf_index
         }
 
-        ch_versions = ch_versions.mix(DEEPVARIANT_RUNDEEPVARIANT.out.versions)
-
         if (params.deepvariant_runtime_report){
-            DEEPVARIANT_VCFSTATSREPORT(DEEPVARIANT_RUNDEEPVARIANT.out.vcf)
+            DEEPVARIANT_VCFSTATSREPORT(ch_dv_vcf)
             html_report = DEEPVARIANT_VCFSTATSREPORT.out.report
         } else {
             html_report = Channel.empty()
